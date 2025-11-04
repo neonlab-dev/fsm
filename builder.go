@@ -1,6 +1,9 @@
 package fsm
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // stateBuilder is used for fluent state configuration.
 type stateBuilder[StateT, EventT Comparable, CtxT any] struct {
@@ -27,17 +30,29 @@ func (f *FSM[StateT, EventT, CtxT]) State(state StateT) *stateBuilder[StateT, Ev
 	return &stateBuilder[StateT, EventT, CtxT]{parent: f, state: state}
 }
 
-// OnEvent begins a new transition definition for (state,event).
-func (b *stateBuilder[StateT, EventT, CtxT]) OnEvent(ev EventT) *eventBuilder[StateT, EventT, CtxT] {
+func (b *stateBuilder[StateT, EventT, CtxT]) newEvent(ev EventT, replace bool) *eventBuilder[StateT, EventT, CtxT] {
 	b.parent.mu.Lock()
 	defer b.parent.mu.Unlock()
 
 	if _, ok := b.parent.transitions[b.state]; !ok {
 		b.parent.transitions[b.state] = make(map[EventT]*transition[StateT, EventT, CtxT])
 	}
+	if existing, ok := b.parent.transitions[b.state][ev]; ok && existing != nil && !replace {
+		panic(fmt.Sprintf("fsm: transition already defined for state=%v event=%v; use OnEventReplace to override", b.state, ev))
+	}
 	tr := &transition[StateT, EventT, CtxT]{}
 	b.parent.transitions[b.state][ev] = tr
 	return &eventBuilder[StateT, EventT, CtxT]{parent: b.parent, state: b.state, event: ev, tr: tr}
+}
+
+// OnEvent begins a new transition definition for (state,event).
+func (b *stateBuilder[StateT, EventT, CtxT]) OnEvent(ev EventT) *eventBuilder[StateT, EventT, CtxT] {
+	return b.newEvent(ev, false)
+}
+
+// OnEventReplace overrides any existing transition for (state,event).
+func (b *stateBuilder[StateT, EventT, CtxT]) OnEventReplace(ev EventT) *eventBuilder[StateT, EventT, CtxT] {
+	return b.newEvent(ev, true)
 }
 
 // Guard appends a guard to the transition.

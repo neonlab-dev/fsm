@@ -13,6 +13,8 @@ var (
 	ErrGuardRejected = errors.New("fsm: guard rejected")
 	// ErrNoSuchState is returned when a state has no transitions registered.
 	ErrNoSuchState = errors.New("fsm: no such state")
+	// ErrClosed indicates the FSM has been closed and no longer accepts events.
+	ErrClosed = errors.New("fsm: closed")
 )
 
 // Comparable constrains State and Event to typical enum-friendly types.
@@ -38,6 +40,9 @@ type Session[StateT, EventT Comparable, CtxT any] struct {
 	Ctx       CtxT
 
 	fsm *FSM[StateT, EventT, CtxT]
+
+	postEvents []queuedEvent[StateT, EventT, CtxT]
+	ctxBefore  CtxT
 }
 
 // Storage persists (State, Ctx) per sessionID.
@@ -64,4 +69,13 @@ type Middleware[StateT, EventT Comparable, CtxT any] func(next ActionFn[StateT, 
 type TimerConfig[StateT, EventT Comparable] struct {
 	After time.Duration
 	Event EventT
+}
+
+// PersistErrorHandler allows callers to observe storage failures.
+type PersistErrorHandler[StateT, EventT Comparable, CtxT any] func(ctx context.Context, s *Session[StateT, EventT, CtxT], persistErr error) error
+
+type queuedEvent[StateT, EventT Comparable, CtxT any] struct {
+	ctx   context.Context
+	event EventT
+	data  any
 }

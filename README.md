@@ -11,6 +11,8 @@
 - **Observabilidade pluggável**: hooks para transições, rejeições de guard, erros de action, timers e falhas ao reenfileirar eventos.
 - **Storage configurável**: use `MemStorage` em testes ou plugue seu próprio repositório (banco SQL, Redis, etc.).
 - **Middlewares de action**: envolva actions com logging, tracing, recoveries personalizados.
+- **Encerramento previsível**: `Close` aborta timers pendentes e fecha novas entradas de eventos.
+- **Eventos encadeados**: `Session.Dispatch` agenda follow-ups mantendo a ordem de processamento por sessão.
 
 ## Instalação
 
@@ -100,6 +102,8 @@ machine.State(OrderPending).
     To(OrderCanceled)
 ```
 
+> **Nota**: `OnEvent` agora falha cedo se você registrar duas vezes o mesmo par (estado, evento). Para substituições conscientes durante refactors, utilize `State(...).OnEventReplace(...)`.
+
 ### 4. Timers e eventos automáticos
 
 ```go
@@ -138,6 +142,49 @@ if err := machine.Send(context.Background(), "order-123", EventAuthorize, "ref-A
 ```
 
 `Send` é seguro para concorrência: se várias goroutines chamarem `Send` com o mesmo `sessionID`, a biblioteca processará uma de cada vez e persistirá o contexto atualizado antes de liberar a próxima.
+Os erros de transição agora incluem o estado/evento problemático para facilitar o debugging.
+
+### Encadeando follow-ups durante uma transição
+
+Se uma action precisar disparar outro evento na sequência, use `Session.Dispatch`. Os eventos são enfileirados e executados logo após a transição atual concluir, respeitando a mesma ordem e bloqueio por sessão.
+
+```go
+machine.State(OrderPending).
+    OnEvent(EventAuthorize).
+    Action(func(ctx context.Context, s *fsm.Session[OrderState, OrderEvent, *OrderCtx]) error {
+        // ... lógica principal ...
+        return s.Dispatch(ctx, EventTimeout, nil) // agenda um follow-up imediato
+    }).To(OrderPaid)
+```
+
+### Tratando erros de persistência (`OnPersistError`)
+
+Ao configurar a FSM, você pode fornecer `OnPersistError`. Ele será chamado quando o `Storage.Save` falhar, já com `StateTo` revertido para `StateFrom` e o contexto restaurado ao valor previamente carregado.
+
+```go
+machine := fsm.New(fsm.Config[OrderState, OrderEvent, *OrderCtx]{
+    Name:           "orders",
+    Initial:        OrderPending,
+    Storage:        store,
+    OnPersistError: func(ctx context.Context, s *fsm.Session[OrderState, OrderEvent, *OrderCtx], err error) error {
+        log.Printf("falha persistindo sessão %s: %v", s.ID, err)
+        return nil // retorne erro customizado se quiser abortar com outra mensagem
+    },
+})
+```
+
+### Encerrando a máquina e limpando timers
+
+Quando terminar de usar a FSM (por exemplo, no shutdown da aplicação), chame `Close` para cancelar timers ativos, aguardar sessões em progresso e rejeitar novos `Send`.
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+
+if err := machine.Close(ctx); err != nil {
+    log.Printf("shutdown incompleto: %v", err)
+}
+```
 
 ### Exemplo completo
 

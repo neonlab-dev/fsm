@@ -10,11 +10,12 @@ import (
 
 // Config defines FSM construction-time options.
 type Config[StateT, EventT Comparable, CtxT any] struct {
-	Name        string
-	Initial     StateT
-	Storage     Storage[StateT, EventT, CtxT]
-	Observer    Observer[StateT, EventT, CtxT]
-	Middlewares []Middleware[StateT, EventT, CtxT]
+	Name           string
+	Initial        StateT
+	Storage        Storage[StateT, EventT, CtxT]
+	Observer       Observer[StateT, EventT, CtxT]
+	Middlewares    []Middleware[StateT, EventT, CtxT]
+	OnPersistError PersistErrorHandler[StateT, EventT, CtxT]
 }
 
 // FSM is a typed finite-state machine with timers and pluggable storage.
@@ -29,11 +30,13 @@ type FSM[StateT, EventT Comparable, CtxT any] struct {
 	storage     Storage[StateT, EventT, CtxT]
 	observer    Observer[StateT, EventT, CtxT]
 	middlewares []Middleware[StateT, EventT, CtxT]
+	persistHook PersistErrorHandler[StateT, EventT, CtxT]
 
 	timerMu      sync.Mutex
 	activeTimers map[string][]*time.Timer // timers per session
 
 	sessionLocks sync.Map // sessionID -> *sessionLock
+	closed       atomic.Bool
 }
 
 // New creates a new FSM instance.
@@ -47,6 +50,7 @@ func New[StateT, EventT Comparable, CtxT any](cfg Config[StateT, EventT, CtxT]) 
 		observer:     cfg.Observer,
 		middlewares:  cfg.Middlewares,
 		activeTimers: make(map[string][]*time.Timer),
+		persistHook:  cfg.OnPersistError,
 	}
 }
 
@@ -72,8 +76,16 @@ func (f *FSM[StateT, EventT, CtxT]) lockSession(sessionID string) func() {
 
 // Send processes an Event for a given sessionID.
 func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, event EventT, data any) error {
+	if f.closed.Load() {
+		return ErrClosed
+	}
 	unlock := f.lockSession(sessionID)
-	defer unlock()
+	lockHeld := true
+	defer func() {
+		if lockHeld {
+			unlock()
+		}
+	}()
 
 	// 1) Load state+ctx
 	var cur StateT
@@ -96,11 +108,11 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 	evMap, hasState := f.transitions[cur]
 	f.mu.RUnlock()
 	if !hasState {
-		return ErrNoSuchState
+		return fmt.Errorf("%w: state=%v", ErrNoSuchState, cur)
 	}
 	tr, hasEvent := evMap[event]
 	if !hasEvent || tr == nil {
-		return ErrInvalidTransition
+		return fmt.Errorf("%w: state=%v event=%v", ErrInvalidTransition, cur, event)
 	}
 
 	// 3) Build session
@@ -117,6 +129,7 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 		Data:      data,
 		Ctx:       userCtx,
 		fsm:       f,
+		ctxBefore: userCtx,
 	}
 
 	// 4) Guards
@@ -142,6 +155,13 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 	// 7) Persist
 	if f.storage != nil {
 		if err := f.storage.Save(ctx, sessionID, s.StateTo, s.Ctx); err != nil {
+			s.Ctx = s.ctxBefore
+			s.StateTo = s.StateFrom
+			if f.persistHook != nil {
+				if hookErr := f.persistHook(ctx, s, err); hookErr != nil {
+					return hookErr
+				}
+			}
 			return fmt.Errorf("fsm: storage save: %w", err)
 		}
 	}
@@ -152,6 +172,23 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 	// 9) Observer
 	if f.observer != nil {
 		f.observer.OnTransition(ctx, *s)
+	}
+	queued := append([]queuedEvent[StateT, EventT, CtxT](nil), s.postEvents...)
+	s.postEvents = nil
+	s.fsm = nil
+
+	if lockHeld {
+		unlock()
+		lockHeld = false
+	}
+
+	for _, qe := range queued {
+		if f.closed.Load() {
+			return ErrClosed
+		}
+		if err := f.Send(qe.ctx, sessionID, qe.event, qe.data); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -180,6 +217,9 @@ func (f *FSM[StateT, EventT, CtxT]) resetAndScheduleTimers(ctx context.Context, 
 	for _, tc := range timers {
 		tc := tc
 		t := time.AfterFunc(tc.After, func() {
+			if f.closed.Load() {
+				return
+			}
 			if f.observer != nil {
 				f.observer.OnTimerFired(timerCtx, sessionID, tc.Event)
 			}
@@ -197,6 +237,51 @@ func (f *FSM[StateT, EventT, CtxT]) resetAndScheduleTimers(ctx context.Context, 
 	if f.observer != nil {
 		for _, tc := range timers {
 			f.observer.OnTimerSet(ctx, sessionID, newState, tc.After, tc.Event)
+		}
+	}
+}
+
+// Close stops timers, waits for in-flight sessions to drain, and prevents new Sends.
+func (f *FSM[StateT, EventT, CtxT]) Close(ctx context.Context) error {
+	if !f.closed.CompareAndSwap(false, true) {
+		return nil
+	}
+	f.timerMu.Lock()
+	timers := f.activeTimers
+	f.activeTimers = make(map[string][]*time.Timer)
+	f.timerMu.Unlock()
+
+	for _, arr := range timers {
+		for _, t := range arr {
+			t.Stop()
+		}
+	}
+
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		idle := true
+		f.sessionLocks.Range(func(key, value any) bool {
+			sl := value.(*sessionLock)
+			if sl.ref.Load() == 0 {
+				f.sessionLocks.Delete(key)
+				return true
+			}
+			idle = false
+			return true
+		})
+		if idle {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
 		}
 	}
 }

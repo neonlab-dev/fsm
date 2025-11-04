@@ -13,6 +13,7 @@
 - **Middlewares de action**: envolva actions com logging, tracing, recoveries personalizados.
 - **Encerramento previsível**: `Close` aborta timers pendentes e fecha novas entradas de eventos.
 - **Eventos encadeados**: `Session.Dispatch` agenda follow-ups mantendo a ordem de processamento por sessão.
+- **Instrumentação pronta**: helper `WithOTelActionSpans` cria spans de OpenTelemetry automaticamente para cada action.
 
 ## Instalação
 
@@ -185,6 +186,31 @@ if err := machine.Close(ctx); err != nil {
     log.Printf("shutdown incompleto: %v", err)
 }
 ```
+
+### Integração com OpenTelemetry
+
+Use o helper `WithOTelActionSpans` para gerar spans automaticamente em cada action. Ele adiciona atributos como `fsm.name`, estado origem/destino, evento e `sessionID`, marcando o span com `codes.Error` quando a action retorna erro.
+
+```go
+import (
+    "go.opentelemetry.io/otel"
+    sdktrace "go.opentelemetry.io/otel/sdk/trace"
+)
+
+tp := sdktrace.NewTracerProvider()
+otel.SetTracerProvider(tp)
+
+machine := fsm.New(fsm.Config[OrderState, OrderEvent, *OrderCtx]{
+    Name:    "orders",
+    Initial: OrderPending,
+    Storage: store,
+    Middlewares: []fsm.Middleware[OrderState, OrderEvent, *OrderCtx]{
+        fsm.WithOTelActionSpans[OrderState, OrderEvent, *OrderCtx](tp.Tracer("orders-fsm")),
+    },
+})
+```
+
+Se você passar `nil` como tracer, o helper usa `otel.Tracer("fsm")`.
 
 ### Exemplo completo
 

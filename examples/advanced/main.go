@@ -45,6 +45,9 @@ func main() {
 		Observer:    observer,
 		Middlewares: []fsm.Middleware[jobState, jobEvent, *jobCtx]{withTracing, withRecover},
 	})
+	defer func() {
+		_ = machine.Close(context.Background())
+	}()
 
 	defineTransitions(machine)
 	runAdvancedDemo(machine, store)

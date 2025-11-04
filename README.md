@@ -226,6 +226,13 @@ func main() {
             Prefix: "[orders]",
         },
     })
+    defer func() {
+        ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+        defer cancel()
+        if err := machine.Close(ctx); err != nil {
+            log.Printf("erro ao fechar FSM: %v", err)
+        }
+    }()
 
     machine.State(OrderPending).
         OnEvent(EventAuthorize).

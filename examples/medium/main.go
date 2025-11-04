@@ -37,6 +37,9 @@ func main() {
 		Storage:     store,
 		Middlewares: []fsm.Middleware[orderState, orderEvent, *orderCtx]{logAction},
 	})
+	defer func() {
+		_ = machine.Close(context.Background())
+	}()
 
 	machine.State(stateCreated).
 		OnEvent(eventPay).
@@ -45,7 +48,7 @@ func main() {
 				s.Ctx = &orderCtx{}
 			}
 			s.Ctx.PaidAt = time.Now()
-			return nil
+			return s.Dispatch(ctx, eventShip, nil)
 		}).
 		To(statePaid)
 
@@ -115,7 +118,6 @@ func runDemo(machine *fsm.FSM[orderState, orderEvent, *orderCtx], store *fsm.Mem
 	}
 
 	send(eventShip, nil)   // falha porque ainda não está pago
-	send(eventPay, nil)    // paga o pedido
-	send(eventShip, nil)   // agora pode despachar
+	send(eventPay, nil)    // paga o pedido e despacha automaticamente via Dispatch
 	send(eventCancel, nil) // não tem efeito porque já despachado, mas mostra serialização
 }

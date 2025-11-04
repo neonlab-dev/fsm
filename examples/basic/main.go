@@ -24,6 +24,9 @@ func main() {
 		Initial: stateOff,
 		Storage: store,
 	})
+	defer func() {
+		_ = machine.Close(context.Background())
+	}()
 
 	machine.State(stateOff).
 		OnEvent(eventToggle).

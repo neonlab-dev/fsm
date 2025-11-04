@@ -55,7 +55,7 @@ type OrderCtx struct {
 
 ```go
 import (
-    "github.com/seu-org/fsm" // ajuste para o path real do módulo
+    "github.com/neonlab-dev/fsm"
 )
 
 store := fsm.NewMemStorage[OrderState, OrderEvent, *OrderCtx](OrderPending)
@@ -212,6 +212,22 @@ machine := fsm.New(fsm.Config[OrderState, OrderEvent, *OrderCtx]{
 
 Se você passar `nil` como tracer, o helper usa `otel.Tracer("fsm")`.
 
+## Testes e cobertura
+
+Todos os testes residem no pacote raiz. Para evitar depender do proxy oficial (útil em ambientes sem rede), execute com `GOPROXY` e `GOSUMDB` desativados e force o toolchain local:
+
+```bash
+GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local go test ./...
+```
+
+Para medir cobertura (atual ~98% das instruções do pacote `fsm`):
+
+```bash
+GOPROXY=off GOSUMDB=off GOTOOLCHAIN=local go test -cover ./...
+```
+
+> Dica: caso precise inspecionar o relatório completo, gere `-coverprofile=coverage.out` e abra com `go tool cover -html=coverage.out`.
+
 ### Exemplo completo
 
 ```go
@@ -222,7 +238,7 @@ import (
     "log"
     "time"
 
-    "github.com/seu-org/fsm" // ajuste para o caminho real
+    "github.com/neonlab-dev/fsm"
 )
 
 type OrderState string
@@ -350,23 +366,49 @@ Para armazenar em Redis ou banco SQL, basta devolver o estado/ctx persistido em 
 
 ## Testes
 
-`fsm_test.go` contém casos cobrindo:
+`fsm_test.go` (e arquivos complementares) cobrem:
 
 - Persistência do contexto e disponibilidade antecipada de `StateTo`.
-- Serialização de `Send` por sessão em cenário concorrente.
-- Notificação de erro quando timers falham ao reenfileirar eventos.
+- Serialização de `Send` por sessão em cenário concorrente e timers com erro.
+- Fechamento via `Close`, fila iterativa de `Dispatch` e limpeza de timers (`fsm_runtime_test.go`).
 
-Use `GOCACHE=$(pwd)/.gocache go test ./...` caso esteja em ambiente que bloqueie o cache do Go fora do workspace.
+Cobertura atual (pacote principal) ≥ 97%. Gere um relatório completo com:
+
+```bash
+make coverage
+go tool cover -html=coverage.out
+```
+
+### Como rodar a suíte
+
+Targets prontos no `Makefile` já exportam `GOPROXY=off`, `GOSUMDB=off` e usam caches locais:
+
+- `make test` — executa `go test ./...`.
+- `make coverage` — grava `coverage.out` com os mesmos parâmetros offline.
+- `make clean-cache` — remove `.gocache/` após a execução, mantendo o workspace limpo.
+
+Caso prefira manualmente:
+
+```bash
+GOCACHE=$(pwd)/.gocache GOMODCACHE=$(pwd)/.gomodcache go test ./...
+```
 
 ## Exemplos
 
-Exemplos incrementais estão disponíveis em `examples/`:
+Exemplos incrementais estão em `examples/`:
 
-- `examples/basico/simple`: liga/desliga uma máquina simples de dois estados, ideal para entender o fluxo básico.
-- `examples/medio/order`: simula um fluxo de pedidos com guards, middleware e mudanças de contexto.
-- `examples/avancado/full`: demonstra armazenamento customizado, middlewares de tracing/recover, timers e observer detalhado.
+- `examples/basic`: demonstra uma FSM on/off e expõe `buildMachine`/`runSequence` para reaproveitamento em testes.
+- `examples/medium`: fluxo de pedidos com guards, middleware e `Dispatch`; `simulateOrder` retorna snapshots e é coberto por `go test`.
+- `examples/advanced`: cenários com timers, retries, observer verboso e middlewares (`simulateJob` auxilia testes).
 
-Execute com `go run ./examples/<nivel>/<nome>` (por exemplo, `go run ./examples/medio/order`).
+Todos os diretórios possuem `main.go` (demonstração CLI) e `main_test.go`, permitindo:
+
+```bash
+go test ./examples/...
+go run ./examples/basic
+```
+
+Os testes evitam a necessidade de execuções manuais e ajudam a manter os exemplos em sincronia com a biblioteca principal.
 
 ## Roadmap / ideias
 

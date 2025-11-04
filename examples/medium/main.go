@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"fsm"
+	"github.com/neonlab-dev/fsm"
 )
 
 type orderState string

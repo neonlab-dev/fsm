@@ -1,4 +1,4 @@
-module fsm
+module github.com/neonlab-dev/fsm
 
 go 1.24.5
 

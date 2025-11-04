@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"fsm"
+	"github.com/neonlab-dev/fsm"
 )
 
 type jobState string

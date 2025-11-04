@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"fsm"
+	"github.com/neonlab-dev/fsm"
 )
 
 type lightState string

@@ -278,6 +278,16 @@ Para armazenar em Redis ou banco SQL, basta devolver o estado/ctx persistido em 
 
 Use `GOCACHE=$(pwd)/.gocache go test ./...` caso esteja em ambiente que bloqueie o cache do Go fora do workspace.
 
+## Exemplos
+
+Exemplos incrementais estão disponíveis em `examples/`:
+
+- `examples/basico/simple`: liga/desliga uma máquina simples de dois estados, ideal para entender o fluxo básico.
+- `examples/medio/order`: simula um fluxo de pedidos com guards, middleware e mudanças de contexto.
+- `examples/avancado/full`: demonstra armazenamento customizado, middlewares de tracing/recover, timers e observer detalhado.
+
+Execute com `go run ./examples/<nivel>/<nome>` (por exemplo, `go run ./examples/medio/order`).
+
 ## Roadmap / ideias
 
 - Adicionar helpers para exportar diagramas de estados.

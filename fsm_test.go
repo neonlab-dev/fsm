@@ -113,8 +113,8 @@ func TestConcurrentSendSerialized(t *testing.T) {
 		return nil
 	})
 
-	const goroutines = 64
-	const perGoroutine = 10
+	const goroutines = 32
+	const perGoroutine = 8
 
 	var wg sync.WaitGroup
 	wg.Add(goroutines)

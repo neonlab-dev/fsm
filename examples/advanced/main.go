@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -55,6 +58,15 @@ func main() {
 	}()
 
 	runAdvancedDemo(machine, store, timeout)
+	if dot := exportGraph(machine); dot != "" {
+		fmt.Println("\n== DOT do fluxo de jobs ==")
+		fmt.Println(dot)
+	}
+	if path, err := saveGraphPNG(machine, ""); err != nil {
+		log.Printf("falha ao gerar PNG (verifique o binário dot): %v", err)
+	} else {
+		fmt.Printf("PNG salvo em: %s\n", path)
+	}
 }
 
 func buildAdvancedMachine(timeout time.Duration) (*fsm.FSM[jobState, jobEvent, *jobCtx], *memoryStore) {
@@ -275,6 +287,47 @@ func runAdvancedDemo(machine *fsm.FSM[jobState, jobEvent, *jobCtx], store *memor
 		log.Fatalf("job-3 finish: %v", err)
 	}
 	printSession(ctx, "job-3", store)
+}
+
+func exportGraph(machine *fsm.FSM[jobState, jobEvent, *jobCtx]) string {
+	var buf bytes.Buffer
+	if err := machine.ExportDOT(&buf); err != nil {
+		log.Printf("erro ao exportar grafo: %v", err)
+		return ""
+	}
+	return buf.String()
+}
+
+func saveGraphPNG(machine *fsm.FSM[jobState, jobEvent, *jobCtx], target string) (string, error) {
+	renderer := fsm.GraphvizRenderer{}
+	if custom := os.Getenv("FSM_DOT_PATH"); custom != "" {
+		renderer.DotPath = custom
+	}
+
+	png, err := fsm.RenderFSMPNG(context.Background(), renderer, machine)
+	if err != nil {
+		return "", err
+	}
+
+	if target == "" {
+		tmpFile, err := os.CreateTemp("", "fsm-graph-*.png")
+		if err != nil {
+			return "", fmt.Errorf("criação de arquivo temporário falhou: %w", err)
+		}
+		defer tmpFile.Close()
+		if _, err := tmpFile.Write(png); err != nil {
+			return "", fmt.Errorf("falha ao escrever PNG: %w", err)
+		}
+		return tmpFile.Name(), nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		return "", fmt.Errorf("falha ao preparar diretório %s: %w", filepath.Dir(target), err)
+	}
+	if err := os.WriteFile(target, png, 0o644); err != nil {
+		return "", fmt.Errorf("falha ao salvar PNG: %w", err)
+	}
+	return target, nil
 }
 
 func printSession(ctx context.Context, session string, store *memoryStore) {

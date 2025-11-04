@@ -12,6 +12,7 @@ Biblioteca leve para construir máquinas de estados tipadas usando generics. A A
 - `MemStorage` pronto para testes ou protótipos
 - `Session.Dispatch` agenda eventos logo após a transição atual
 - Middleware `WithOTelActionSpans` cria spans OpenTelemetry para cada action
+- `ExportDOT` / `SnapshotGraph` facilitam visualizar a FSM em Graphviz
 
 ## Exemplo rápido
 
@@ -55,6 +56,37 @@ if err := maquina.Send(context.Background(), "sessao-1", EventoComecar, nil); er
 }
 defer maquina.Close(context.Background())
 ```
+
+## Visualizando o grafo
+
+Você pode gerar um arquivo Graphviz (DOT) diretamente da instância:
+
+```go
+var buf bytes.Buffer
+if err := maquina.ExportDOT(&buf); err != nil {
+    log.Fatalf("falha ao exportar DOT: %v", err)
+}
+fmt.Println(buf.String())
+```
+
+> Lembre-se de importar `bytes`, `fmt` e `log` no exemplo acima.
+
+Também é possível personalizar rótulos com `WithStateFormatter`, `WithEventFormatter`, remover metadados com `WithoutMetadata` ou omitir timers com `WithoutTimers`. Para processar a estrutura manualmente, utilize `maquina.SnapshotGraph()` e itere sobre estados, transições e timers retornados.
+
+Para gerar um PNG (com Graphviz instalado e `dot` no `PATH`). Sem chamar as funções abaixo nada é executado, portanto não há custo adicional para quem não precisa de imagens:
+
+```go
+renderer := fsm.GraphvizRenderer{}
+png, err := fsm.RenderFSMPNG(context.Background(), renderer, maquina)
+if err != nil {
+    log.Fatalf("gerar png: %v", err)
+}
+if err := os.WriteFile("fsm.png", png, 0o644); err != nil {
+    log.Fatalf("salvar png: %v", err)
+}
+```
+
+Defina `renderer.DotPath` se o executável estiver fora do `PATH` e use `renderer.Args` (por exemplo `-Gdpi=150`) para ajustar a renderização.
 
 ## Testes
 

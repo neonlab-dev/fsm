@@ -12,6 +12,7 @@ This project provides a strongly typed finite-state machine built with Go generi
 - In-memory storage helper included for tests and demos
 - Optional `Session.Dispatch` queues events that should run right after the current transition
 - `WithOTelActionSpans` middleware creates OpenTelemetry spans around actions
+- `ExportDOT` / `SnapshotGraph` make it easy to visualize the FSM in Graphviz
 
 ## Quick start
 
@@ -56,6 +57,37 @@ if err := machine.Send(context.Background(), "session-1", EventStart, nil); err 
 }
 defer machine.Close(context.Background())
 ```
+
+## Visualizing the FSM
+
+You can dump the current topology to Graphviz (DOT) straight from the machine:
+
+```go
+var buf bytes.Buffer
+if err := machine.ExportDOT(&buf); err != nil {
+    log.Fatalf("DOT export failed: %v", err)
+}
+fmt.Println(buf.String())
+```
+
+> Requires the standard `bytes`, `fmt`, and `log` packages in your imports.
+
+Prefer to tweak labels or inspect the structure programmatically? Call `machine.SnapshotGraph()` and iterate over the returned states/transitions, or customize the DOT with helpers such as `WithStateFormatter`, `WithEventFormatter`, `WithoutMetadata`, and `WithoutTimers`.
+
+Need PNG output? Install Graphviz (`dot` in your PATH) and run. The renderer is completely lazy — if you never call it, no extra processes are spawned.
+
+```go
+renderer := fsm.GraphvizRenderer{}
+png, err := fsm.RenderFSMPNG(context.Background(), renderer, machine)
+if err != nil {
+    log.Fatalf("generate png: %v", err)
+}
+if err := os.WriteFile("fsm.png", png, 0o644); err != nil {
+    log.Fatalf("save png: %v", err)
+}
+```
+
+Set `renderer.DotPath` when `dot` lives outside the PATH, and leverage `renderer.Args` (for example `-Gdpi=150`) to tweak the rendering.
 
 ## Testing
 

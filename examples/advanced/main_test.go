@@ -4,6 +4,10 @@ import (
 	"context"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -123,5 +127,70 @@ func TestJobRetryFlow(t *testing.T) {
 	}
 	if results[3].Ctx == nil || results[3].Ctx.LastError != "" {
 		t.Fatalf("finish should clear errors, ctx=%v", results[3].Ctx)
+	}
+}
+
+func TestExportGraphHelper(t *testing.T) {
+	t.Cleanup(silenceLogs(t))
+
+	timeout := 10 * time.Millisecond
+	machine, _ := buildAdvancedMachine(timeout)
+	t.Cleanup(func() {
+		_ = machine.Close(context.Background())
+	})
+
+	dot := exportGraph(machine)
+	if dot == "" {
+		t.Fatalf("expected DOT payload, got empty string")
+	}
+	if !strings.Contains(dot, "jobs-advanced") {
+		t.Fatalf("expected graph name in DOT output, got %q", dot)
+	}
+}
+
+func TestSaveGraphPNGUsesCustomDot(t *testing.T) {
+	// rely on POSIX shell for fake script; skip on Windows to keep portability
+	if runtime.GOOS == "windows" {
+		t.Skip("fake dot script usa shell POSIX")
+	}
+
+	timeout := 5 * time.Millisecond
+	machine, _ := buildAdvancedMachine(timeout)
+	t.Cleanup(func() {
+		_ = machine.Close(context.Background())
+	})
+
+	tmpDir := t.TempDir()
+	capture := filepath.Join(tmpDir, "captured.dot")
+	pngPath := filepath.Join(tmpDir, "graph.png")
+	fakePNG := []byte("example-png")
+
+	scriptPath := filepath.Join(tmpDir, "dot")
+	script := "#!/bin/sh\nset -eu\ncat > \"${FSM_DOT_CAPTURE}\"\nprintf '%s' \"" + string(fakePNG) + "\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake dot: %v", err)
+	}
+
+	t.Setenv("FSM_DOT_PATH", scriptPath)
+	t.Setenv("FSM_DOT_CAPTURE", capture)
+
+	path, err := saveGraphPNG(machine, pngPath)
+	if err != nil {
+		t.Fatalf("saveGraphPNG failed: %v", err)
+	}
+	if path != pngPath {
+		t.Fatalf("unexpected path returned: %s", path)
+	}
+
+	gotPNG, err := os.ReadFile(pngPath)
+	if err != nil {
+		t.Fatalf("reading png: %v", err)
+	}
+	if string(gotPNG) != string(fakePNG) {
+		t.Fatalf("png content mismatch: %q", gotPNG)
+	}
+
+	if _, err := os.Stat(capture); err != nil {
+		t.Fatalf("expected dot capture file: %v", err)
 	}
 }

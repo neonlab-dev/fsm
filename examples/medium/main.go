@@ -29,17 +29,44 @@ type orderCtx struct {
 }
 
 func main() {
-	store := fsm.NewMemStorage[orderState, orderEvent, *orderCtx](stateCreated)
+	machine, store := buildMachine()
+	defer func() {
+		_ = machine.Close(context.Background())
+	}()
 
+	results := simulateOrder(machine, store, []orderEvent{
+		eventShip,
+		eventPay,
+		eventCancel,
+	})
+
+	for _, res := range results {
+		fmt.Printf("\n== enviando evento %q ==\n", res.Event)
+		if res.Err != nil {
+			fmt.Printf("erro: %v\n", res.Err)
+		}
+		fmt.Printf("novo estado: %s\n", res.State)
+		if res.Ctx != nil {
+			fmt.Printf("ctx: %+v\n", *res.Ctx)
+		}
+	}
+}
+
+type stepResult struct {
+	Event orderEvent
+	State orderState
+	Ctx   *orderCtx
+	Err   error
+}
+
+func buildMachine() (*fsm.FSM[orderState, orderEvent, *orderCtx], *fsm.MemStorage[orderState, orderEvent, *orderCtx]) {
+	store := fsm.NewMemStorage[orderState, orderEvent, *orderCtx](stateCreated)
 	machine := fsm.New(fsm.Config[orderState, orderEvent, *orderCtx]{
 		Name:        "orders-medio",
 		Initial:     stateCreated,
 		Storage:     store,
 		Middlewares: []fsm.Middleware[orderState, orderEvent, *orderCtx]{logAction},
 	})
-	defer func() {
-		_ = machine.Close(context.Background())
-	}()
 
 	machine.State(stateCreated).
 		OnEvent(eventPay).
@@ -76,7 +103,7 @@ func main() {
 		Action(cancelWithNote("cancelado após pagamento")).
 		To(stateCanceled)
 
-	runDemo(machine, store)
+	return machine, store
 }
 
 func logAction(next fsm.ActionFn[orderState, orderEvent, *orderCtx]) fsm.ActionFn[orderState, orderEvent, *orderCtx] {
@@ -101,23 +128,23 @@ func cancelWithNote(note string) fsm.ActionFn[orderState, orderEvent, *orderCtx]
 	}
 }
 
-func runDemo(machine *fsm.FSM[orderState, orderEvent, *orderCtx], store *fsm.MemStorage[orderState, orderEvent, *orderCtx]) {
+func simulateOrder(machine *fsm.FSM[orderState, orderEvent, *orderCtx], store *fsm.MemStorage[orderState, orderEvent, *orderCtx], events []orderEvent) []stepResult {
 	session := "order-42"
 	ctx := context.Background()
+	results := make([]stepResult, 0, len(events))
 
-	send := func(ev orderEvent, payload any) {
-		fmt.Printf("\n== enviando evento %q ==\n", ev)
-		if err := machine.Send(ctx, session, ev, payload); err != nil {
-			fmt.Printf("erro: %v\n", err)
+	for _, ev := range events {
+		res := stepResult{Event: ev}
+		res.Err = machine.Send(ctx, session, ev, nil)
+		state, meta, _, loadErr := store.Load(ctx, session)
+		if loadErr == nil {
+			res.State = state
+			if meta != nil {
+				cp := *meta
+				res.Ctx = &cp
+			}
 		}
-		state, meta, _, _ := store.Load(ctx, session)
-		fmt.Printf("novo estado: %s\n", state)
-		if meta != nil {
-			fmt.Printf("ctx: %+v\n", *meta)
-		}
+		results = append(results, res)
 	}
-
-	send(eventShip, nil)   // falha porque ainda não está pago
-	send(eventPay, nil)    // paga o pedido e despacha automaticamente via Dispatch
-	send(eventCancel, nil) // não tem efeito porque já despachado, mas mostra serialização
+	return results
 }

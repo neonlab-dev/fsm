@@ -36,6 +36,7 @@ type FSM[StateT, EventT Comparable, CtxT any] struct {
 	activeTimers map[string][]*time.Timer // timers per session
 
 	sessionLocks sync.Map // sessionID -> *sessionLock
+	sessionWG    sync.WaitGroup
 	closed       atomic.Bool
 }
 
@@ -64,6 +65,7 @@ func (f *FSM[StateT, EventT, CtxT]) lockSession(sessionID string) func() {
 	actual, _ := f.sessionLocks.LoadOrStore(sessionID, &sessionLock{})
 	sl := actual.(*sessionLock)
 	sl.ref.Add(1)
+	f.sessionWG.Add(1)
 	sl.mu.Lock()
 
 	return func() {
@@ -71,6 +73,7 @@ func (f *FSM[StateT, EventT, CtxT]) lockSession(sessionID string) func() {
 		if sl.ref.Add(-1) == 0 {
 			f.sessionLocks.Delete(sessionID)
 		}
+		f.sessionWG.Done()
 	}
 }
 
@@ -79,15 +82,36 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 	if f.closed.Load() {
 		return ErrClosed
 	}
-	unlock := f.lockSession(sessionID)
-	lockHeld := true
-	defer func() {
-		if lockHeld {
-			unlock()
-		}
-	}()
+	queue := []queuedEvent[StateT, EventT, CtxT]{{
+		ctx:   ctx,
+		event: event,
+		data:  data,
+	}}
+	first := true
 
-	// 1) Load state+ctx
+	for len(queue) > 0 {
+		qe := queue[0]
+		queue = queue[1:]
+		if !first && f.closed.Load() {
+			return ErrClosed
+		}
+		next, err := f.processEvent(qe.ctx, sessionID, qe.event, qe.data)
+		if err != nil {
+			return err
+		}
+		queue = append(queue, next...)
+		first = false
+	}
+	return nil
+}
+
+func (f *FSM[StateT, EventT, CtxT]) processEvent(ctx context.Context, sessionID string, event EventT, data any) ([]queuedEvent[StateT, EventT, CtxT], error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	unlock := f.lockSession(sessionID)
+	defer unlock()
+
 	var cur StateT
 	var userCtx CtxT
 	var ok bool
@@ -96,26 +120,24 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 	if f.storage != nil {
 		cur, userCtx, ok, err = f.storage.Load(ctx, sessionID)
 		if err != nil {
-			return fmt.Errorf("fsm: storage load: %w", err)
+			return nil, fmt.Errorf("fsm: storage load: %w", err)
 		}
 	}
 	if !ok {
 		cur = f.initial
 	}
 
-	// 2) Resolve transition
 	f.mu.RLock()
 	evMap, hasState := f.transitions[cur]
 	f.mu.RUnlock()
 	if !hasState {
-		return fmt.Errorf("%w: state=%v", ErrNoSuchState, cur)
+		return nil, fmt.Errorf("%w: state=%v", ErrNoSuchState, cur)
 	}
 	tr, hasEvent := evMap[event]
 	if !hasEvent || tr == nil {
-		return fmt.Errorf("%w: state=%v event=%v", ErrInvalidTransition, cur, event)
+		return nil, fmt.Errorf("%w: state=%v event=%v", ErrInvalidTransition, cur, event)
 	}
 
-	// 3) Build session
 	destState := cur
 	if tr.to != nil {
 		destState = *tr.to
@@ -124,7 +146,7 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 	s := &Session[StateT, EventT, CtxT]{
 		ID:        sessionID,
 		StateFrom: cur,
-		StateTo:   destState, // expose intended destination early so guards/actions can react
+		StateTo:   destState,
 		Event:     event,
 		Data:      data,
 		Ctx:       userCtx,
@@ -132,65 +154,48 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 		ctxBefore: userCtx,
 	}
 
-	// 4) Guards
 	for _, g := range tr.guards {
 		if err := g(ctx, s); err != nil {
 			if f.observer != nil {
 				f.observer.OnGuardRejected(ctx, *s, err)
 			}
-			return fmt.Errorf("%w: %w", ErrGuardRejected, err)
+			return nil, fmt.Errorf("%w: %w", ErrGuardRejected, err)
 		}
 	}
 
-	// 5) Actions
 	for _, a := range tr.actions {
 		if err := a(ctx, s); err != nil {
 			if f.observer != nil {
 				f.observer.OnActionError(ctx, *s, err)
 			}
-			return err
+			return nil, err
 		}
 	}
 
-	// 7) Persist
 	if f.storage != nil {
 		if err := f.storage.Save(ctx, sessionID, s.StateTo, s.Ctx); err != nil {
 			s.Ctx = s.ctxBefore
 			s.StateTo = s.StateFrom
 			if f.persistHook != nil {
 				if hookErr := f.persistHook(ctx, s, err); hookErr != nil {
-					return hookErr
+					return nil, hookErr
 				}
 			}
-			return fmt.Errorf("fsm: storage save: %w", err)
+			return nil, fmt.Errorf("fsm: storage save: %w", err)
 		}
 	}
 
-	// 8) Timers
 	f.resetAndScheduleTimers(ctx, sessionID, s.StateTo)
 
-	// 9) Observer
 	if f.observer != nil {
 		f.observer.OnTransition(ctx, *s)
 	}
+
 	queued := append([]queuedEvent[StateT, EventT, CtxT](nil), s.postEvents...)
 	s.postEvents = nil
 	s.fsm = nil
 
-	if lockHeld {
-		unlock()
-		lockHeld = false
-	}
-
-	for _, qe := range queued {
-		if f.closed.Load() {
-			return ErrClosed
-		}
-		if err := f.Send(qe.ctx, sessionID, qe.event, qe.data); err != nil {
-			return err
-		}
-	}
-	return nil
+	return queued, nil
 }
 
 func (f *FSM[StateT, EventT, CtxT]) resetAndScheduleTimers(ctx context.Context, sessionID string, newState StateT) {
@@ -261,27 +266,24 @@ func (f *FSM[StateT, EventT, CtxT]) Close(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
-	ticker := time.NewTicker(5 * time.Millisecond)
-	defer ticker.Stop()
+	waitCh := make(chan struct{})
+	go func() {
+		f.sessionWG.Wait()
+		close(waitCh)
+	}()
 
-	for {
-		idle := true
-		f.sessionLocks.Range(func(key, value any) bool {
-			sl := value.(*sessionLock)
-			if sl.ref.Load() == 0 {
-				f.sessionLocks.Delete(key)
-				return true
-			}
-			idle = false
-			return true
-		})
-		if idle {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-		}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-waitCh:
 	}
+	// ensure map cleanup for any idle entries
+	f.sessionLocks.Range(func(key, value any) bool {
+		sl := value.(*sessionLock)
+		if sl.ref.Load() == 0 {
+			f.sessionLocks.Delete(key)
+		}
+		return true
+	})
+	return nil
 }

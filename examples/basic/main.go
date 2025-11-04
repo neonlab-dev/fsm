@@ -18,15 +18,32 @@ const (
 )
 
 func main() {
+	machine, store := buildMachine()
+	defer func() {
+		_ = machine.Close(context.Background())
+	}()
+
+	states, err := runSequence(machine, store, []lightEvent{
+		eventToggle,
+		eventToggle,
+		eventToggle,
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	for idx, st := range states {
+		fmt.Printf("step %d: estado atual %q\n", idx+1, st)
+	}
+}
+
+func buildMachine() (*fsm.FSM[lightState, lightEvent, struct{}], *fsm.MemStorage[lightState, lightEvent, struct{}]) {
 	store := fsm.NewMemStorage[lightState, lightEvent, struct{}](stateOff)
 	machine := fsm.New(fsm.Config[lightState, lightEvent, struct{}]{
 		Name:    "light-demo",
 		Initial: stateOff,
 		Storage: store,
 	})
-	defer func() {
-		_ = machine.Close(context.Background())
-	}()
 
 	machine.State(stateOff).
 		OnEvent(eventToggle).
@@ -44,21 +61,25 @@ func main() {
 		}).
 		To(stateOff)
 
-	run(machine, store, stateOff)
+	return machine, store
 }
 
-func run(machine *fsm.FSM[lightState, lightEvent, struct{}], store *fsm.MemStorage[lightState, lightEvent, struct{}], initial lightState) {
+func runSequence(machine *fsm.FSM[lightState, lightEvent, struct{}], store *fsm.MemStorage[lightState, lightEvent, struct{}], events []lightEvent) ([]lightState, error) {
 	ctx := context.Background()
-	steps := []lightEvent{eventToggle, eventToggle, eventToggle}
+	states := make([]lightState, 0, len(events))
 
-	for idx, ev := range steps {
+	for _, ev := range events {
 		if err := machine.Send(ctx, "lamp", ev, nil); err != nil {
-			panic(err)
+			return nil, err
 		}
-		state, _, ok, _ := store.Load(ctx, "lamp")
+		state, _, ok, err := store.Load(ctx, "lamp")
+		if err != nil {
+			return nil, err
+		}
 		if !ok {
-			state = initial
+			state = stateOff
 		}
-		fmt.Printf("step %d: estado atual %q\n", idx+1, state)
+		states = append(states, state)
 	}
+	return states, nil
 }

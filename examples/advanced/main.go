@@ -34,26 +34,43 @@ type jobCtx struct {
 	LastError  string
 }
 
-func main() {
-	store := newMemoryStore(statePending)
-	observer := verboseObserver{}
+type jobCommand struct {
+	Event jobEvent
+	Data  any
+}
 
-	machine := fsm.New(fsm.Config[jobState, jobEvent, *jobCtx]{
-		Name:        "jobs-advanced",
-		Initial:     statePending,
-		Storage:     store,
-		Observer:    observer,
-		Middlewares: []fsm.Middleware[jobState, jobEvent, *jobCtx]{withTracing, withRecover},
-	})
+type jobResult struct {
+	Event   jobEvent
+	State   jobState
+	Ctx     *jobCtx
+	Err     error
+	Session string
+}
+
+func main() {
+	const timeout = 200 * time.Millisecond
+	machine, store := buildAdvancedMachine(timeout)
 	defer func() {
 		_ = machine.Close(context.Background())
 	}()
 
-	defineTransitions(machine)
-	runAdvancedDemo(machine, store)
+	runAdvancedDemo(machine, store, timeout)
 }
 
-func defineTransitions(machine *fsm.FSM[jobState, jobEvent, *jobCtx]) {
+func buildAdvancedMachine(timeout time.Duration) (*fsm.FSM[jobState, jobEvent, *jobCtx], *memoryStore) {
+	store := newMemoryStore(statePending)
+	machine := fsm.New(fsm.Config[jobState, jobEvent, *jobCtx]{
+		Name:        "jobs-advanced",
+		Initial:     statePending,
+		Storage:     store,
+		Observer:    verboseObserver{},
+		Middlewares: []fsm.Middleware[jobState, jobEvent, *jobCtx]{withTracing, withRecover},
+	})
+	defineTransitions(machine, timeout)
+	return machine, store
+}
+
+func defineTransitions(machine *fsm.FSM[jobState, jobEvent, *jobCtx], timeout time.Duration) {
 	// pending -> running
 	machine.State(statePending).
 		OnEvent(eventStart).
@@ -111,7 +128,7 @@ func defineTransitions(machine *fsm.FSM[jobState, jobEvent, *jobCtx]) {
 
 	// configure timers on entering running
 	machine.State(stateRunning).
-		OnEnter(fsm.WithTimer[jobState, jobEvent](200*time.Millisecond, eventTimeout))
+		OnEnter(fsm.WithTimer[jobState, jobEvent](timeout, eventTimeout))
 }
 
 func limitAttempts(max int) fsm.GuardFn[jobState, jobEvent, *jobCtx] {
@@ -224,14 +241,14 @@ func (m *memoryStore) Save(ctx context.Context, sessionID string, state jobState
 	return nil
 }
 
-func runAdvancedDemo(machine *fsm.FSM[jobState, jobEvent, *jobCtx], store *memoryStore) {
+func runAdvancedDemo(machine *fsm.FSM[jobState, jobEvent, *jobCtx], store *memoryStore, timeout time.Duration) {
 	ctx := context.Background()
 
 	fmt.Println("== job 1: sucesso antes do timeout ==")
 	if err := machine.Send(ctx, "job-1", eventStart, nil); err != nil {
 		log.Fatalf("job-1 start: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(timeout / 4)
 	if err := machine.Send(ctx, "job-1", eventFinish, nil); err != nil {
 		log.Fatalf("job-1 finish: %v", err)
 	}
@@ -241,7 +258,7 @@ func runAdvancedDemo(machine *fsm.FSM[jobState, jobEvent, *jobCtx], store *memor
 	if err := machine.Send(ctx, "job-2", eventStart, nil); err != nil {
 		log.Fatalf("job-2 start: %v", err)
 	}
-	time.Sleep(300 * time.Millisecond) // aguarda timer disparar
+	time.Sleep(timeout + timeout/2) // aguarda timer disparar
 	printSession(ctx, "job-2", store)
 
 	fmt.Println("\n== job 3: falha e retry ==")
@@ -271,4 +288,28 @@ func printSession(ctx context.Context, session string, store *memoryStore) {
 		fmt.Printf("contexto: attempts=%d started=%s finished=%s lastError=%q\n",
 			meta.Attempts, meta.StartedAt.Format(time.RFC3339Nano), meta.FinishedAt.Format(time.RFC3339Nano), meta.LastError)
 	}
+}
+
+func simulateJob(machine *fsm.FSM[jobState, jobEvent, *jobCtx], store *memoryStore, session string, steps []jobCommand) []jobResult {
+	ctx := context.Background()
+	results := make([]jobResult, 0, len(steps))
+	for _, step := range steps {
+		res := jobResult{
+			Event:   step.Event,
+			Session: session,
+		}
+		res.Err = machine.Send(ctx, session, step.Event, step.Data)
+		state, meta, _, loadErr := store.Load(ctx, session)
+		if loadErr == nil {
+			res.State = state
+			if meta != nil {
+				cp := *meta
+				res.Ctx = &cp
+			}
+		} else if res.Err == nil {
+			res.Err = loadErr
+		}
+		results = append(results, res)
+	}
+	return results
 }

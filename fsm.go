@@ -19,7 +19,7 @@
 //
 //	store := fsm.NewMemStorage[State, Event, *Ctx](S_INIT)
 //	m := fsm.New(fsm.Config[State, Event, *Ctx]{ Name: "demo", Initial: S_INIT, Storage: store })
-//	m.State(S_INIT).OnEvent(E_START).Action(func(ctx context.Context, s fsm.Session[State, Event, *Ctx]) error {
+//	m.State(S_INIT).OnEvent(E_START).Action(func(ctx context.Context, s *fsm.Session[State, Event, *Ctx]) error {
 //	    if s.Ctx == nil { s.Ctx = &Ctx{} }
 //	    s.Ctx.Name = "User"
 //	    return nil
@@ -46,13 +46,17 @@ var (
 )
 
 // Comparable constrains State and Event to typical enum-friendly types.
-type Comparable interface{ ~int | ~int32 | ~int64 | ~string }
+type Comparable interface {
+	~int | ~int32 | ~int64 | ~string
+}
 
 // GuardFn runs before actions; any non-nil error aborts the transition.
-type GuardFn[StateT, EventT Comparable, CtxT any] func(ctx context.Context, s Session[StateT, EventT, CtxT]) error
+// Guards receive a pointer to the mutable session so updates to Ctx/StateTo persist.
+type GuardFn[StateT, EventT Comparable, CtxT any] func(ctx context.Context, s *Session[StateT, EventT, CtxT]) error
 
 // ActionFn runs as part of a transition. Actions are executed in order.
-type ActionFn[StateT, EventT Comparable, CtxT any] func(ctx context.Context, s Session[StateT, EventT, CtxT]) error
+// Actions can mutate the session in-place so the storage layer observes the changes.
+type ActionFn[StateT, EventT Comparable, CtxT any] func(ctx context.Context, s *Session[StateT, EventT, CtxT]) error
 
 // Session contains transition-scoped data.
 type Session[StateT, EventT Comparable, CtxT any] struct {
@@ -232,7 +236,7 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 	}
 
 	// 3) Build session
-	s := Session[StateT, EventT, CtxT]{
+	s := &Session[StateT, EventT, CtxT]{
 		ID:        sessionID,
 		StateFrom: cur,
 		StateTo:   cur,
@@ -246,7 +250,7 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 	for _, g := range tr.guards {
 		if err := g(ctx, s); err != nil {
 			if f.observer != nil {
-				f.observer.OnGuardRejected(ctx, s, err)
+				f.observer.OnGuardRejected(ctx, *s, err)
 			}
 			return ErrGuardRejected
 		}
@@ -256,7 +260,7 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 	for _, a := range tr.actions {
 		if err := a(ctx, s); err != nil {
 			if f.observer != nil {
-				f.observer.OnActionError(ctx, s, err)
+				f.observer.OnActionError(ctx, *s, err)
 			}
 			return err
 		}
@@ -279,7 +283,7 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 
 	// 9) Observer
 	if f.observer != nil {
-		f.observer.OnTransition(ctx, s)
+		f.observer.OnTransition(ctx, *s)
 	}
 	return nil
 }
@@ -332,8 +336,8 @@ func (f *FSM[StateT, EventT, CtxT]) resetAndScheduleTimers(ctx context.Context, 
 
 // MemStorage is an in-memory Storage implementation for testing/dev.
 type MemStorage[StateT, EventT Comparable, CtxT any] struct {
-	mu      sync.RWMutex
-	data    map[string]struct {
+	mu   sync.RWMutex
+	data map[string]struct {
 		State StateT
 		Ctx   CtxT
 	}
@@ -344,7 +348,10 @@ type MemStorage[StateT, EventT Comparable, CtxT any] struct {
 // NewMemStorage creates a memory-backed storage with the provided initial state.
 func NewMemStorage[StateT, EventT Comparable, CtxT any](initial StateT) *MemStorage[StateT, EventT, CtxT] {
 	return &MemStorage[StateT, EventT, CtxT]{
-		data:    make(map[string]struct{ State StateT; Ctx CtxT }),
+		data: make(map[string]struct {
+			State StateT
+			Ctx   CtxT
+		}),
 		initial: initial,
 	}
 }
@@ -373,17 +380,23 @@ func (m *MemStorage[StateT, EventT, CtxT]) Save(ctx context.Context, sessionID s
 // NoopObserver discards all observer events.
 type NoopObserver[StateT, EventT Comparable, CtxT any] struct{}
 
-func (NoopObserver[StateT, EventT, CtxT]) OnTransition(context.Context, Session[StateT, EventT, CtxT])                     {}
-func (NoopObserver[StateT, EventT, CtxT]) OnGuardRejected(context.Context, Session[StateT, EventT, CtxT], error)         {}
-func (NoopObserver[StateT, EventT, CtxT]) OnActionError(context.Context, Session[StateT, EventT, CtxT], error)           {}
-func (NoopObserver[StateT, EventT, CtxT]) OnTimerSet(context.Context, string, StateT, time.Duration, EventT)            {}
-func (NoopObserver[StateT, EventT, CtxT]) OnTimerFired(context.Context, string, EventT)                                  {}
+func (NoopObserver[StateT, EventT, CtxT]) OnTransition(context.Context, Session[StateT, EventT, CtxT]) {
+}
+func (NoopObserver[StateT, EventT, CtxT]) OnGuardRejected(context.Context, Session[StateT, EventT, CtxT], error) {
+}
+func (NoopObserver[StateT, EventT, CtxT]) OnActionError(context.Context, Session[StateT, EventT, CtxT], error) {
+}
+func (NoopObserver[StateT, EventT, CtxT]) OnTimerSet(context.Context, string, StateT, time.Duration, EventT) {
+}
+func (NoopObserver[StateT, EventT, CtxT]) OnTimerFired(context.Context, string, EventT) {}
 
 // LogObserver writes simple logs via the standard library log package.
 type LogObserver[StateT, EventT Comparable, CtxT any] struct{ Prefix string }
 
 func (o LogObserver[StateT, EventT, CtxT]) pfx() string {
-	if o.Prefix == "" { return "[FSM]" }
+	if o.Prefix == "" {
+		return "[FSM]"
+	}
 	return o.Prefix
 }
 

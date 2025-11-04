@@ -10,11 +10,11 @@ export GOTOOLCHAIN ?= local
 
 test:
 	@echo ">> running unit tests"
-	GOCACHE=$(GOCACHE_DIR) GOMODCACHE=$(GOMODCACHE_DIR) $(GO) test ./...
+	GOCACHE=$(GOCACHE_DIR) GOMODCACHE=$(GOMODCACHE_DIR) $(GO) test .
 
 coverage:
 	@echo ">> generating coverage.out"
-	GOCACHE=$(GOCACHE_DIR) GOMODCACHE=$(GOMODCACHE_DIR) $(GO) test -coverprofile=coverage.out ./...
+	GOCACHE=$(GOCACHE_DIR) GOMODCACHE=$(GOMODCACHE_DIR) $(GO) test -coverprofile=coverage.out .
 
 clean-cache:
 	@echo ">> removing go build caches"

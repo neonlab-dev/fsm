@@ -4,7 +4,8 @@
 //   - Guards and Actions (with middleware support)
 //   - Pluggable storage (persist State + Context per session)
 //   - Timers fired on state entry (schedule an Event after a duration)
-//   - Observability hooks (transition, guard, action, timer)
+//   - Observability hooks (transition, guard, action, timer, timer errors)
+//   - Concurrency-safe per session (serializes Send calls per sessionID)
 //   - In-memory storage and basic observers included
 //
 // Usage quickstart:
@@ -33,6 +34,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -83,6 +85,8 @@ type Observer[StateT, EventT Comparable, CtxT any] interface {
 	OnActionError(ctx context.Context, s Session[StateT, EventT, CtxT], err error)
 	OnTimerSet(ctx context.Context, sessionID string, state StateT, d time.Duration, event EventT)
 	OnTimerFired(ctx context.Context, sessionID string, event EventT)
+	// OnTimerError receives any error returned when the delayed event dispatch fails.
+	OnTimerError(ctx context.Context, sessionID string, event EventT, err error)
 }
 
 // Middleware wraps actions (e.g., tracing/recover/metrics).
@@ -136,6 +140,8 @@ type FSM[StateT, EventT Comparable, CtxT any] struct {
 
 	timerMu      sync.Mutex
 	activeTimers map[string][]*time.Timer // timers per session
+
+	sessionLocks sync.Map // sessionID -> *sessionLock
 }
 
 // New creates a new FSM instance.
@@ -205,8 +211,31 @@ func WithTimer[StateT, EventT Comparable](after time.Duration, event EventT) Tim
 	return TimerConfig[StateT, EventT]{After: after, Event: event}
 }
 
+// sessionLock reference-counts a mutex so we can clean up when idle.
+type sessionLock struct {
+	mu  sync.Mutex
+	ref atomic.Int32
+}
+
+func (f *FSM[StateT, EventT, CtxT]) lockSession(sessionID string) func() {
+	actual, _ := f.sessionLocks.LoadOrStore(sessionID, &sessionLock{})
+	sl := actual.(*sessionLock)
+	sl.ref.Add(1)
+	sl.mu.Lock()
+
+	return func() {
+		sl.mu.Unlock()
+		if sl.ref.Add(-1) == 0 {
+			f.sessionLocks.Delete(sessionID)
+		}
+	}
+}
+
 // Send processes an Event for a given sessionID.
 func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, event EventT, data any) error {
+	unlock := f.lockSession(sessionID)
+	defer unlock()
+
 	// 1) Load state+ctx
 	var cur StateT
 	var userCtx CtxT
@@ -236,10 +265,15 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 	}
 
 	// 3) Build session
+	destState := cur
+	if tr.to != nil {
+		destState = *tr.to
+	}
+
 	s := &Session[StateT, EventT, CtxT]{
 		ID:        sessionID,
 		StateFrom: cur,
-		StateTo:   cur,
+		StateTo:   destState, // expose intended destination early so guards/actions can react
 		Event:     event,
 		Data:      data,
 		Ctx:       userCtx,
@@ -252,7 +286,7 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 			if f.observer != nil {
 				f.observer.OnGuardRejected(ctx, *s, err)
 			}
-			return ErrGuardRejected
+			return fmt.Errorf("%w: %w", ErrGuardRejected, err)
 		}
 	}
 
@@ -264,11 +298,6 @@ func (f *FSM[StateT, EventT, CtxT]) Send(ctx context.Context, sessionID string, 
 			}
 			return err
 		}
-	}
-
-	// 6) Destination
-	if tr.to != nil {
-		s.StateTo = *tr.to
 	}
 
 	// 7) Persist
@@ -308,13 +337,16 @@ func (f *FSM[StateT, EventT, CtxT]) resetAndScheduleTimers(ctx context.Context, 
 	}
 
 	var created []*time.Timer
+	timerCtx := context.WithoutCancel(ctx)
 	for _, tc := range timers {
 		tc := tc
 		t := time.AfterFunc(tc.After, func() {
 			if f.observer != nil {
-				f.observer.OnTimerFired(ctx, sessionID, tc.Event)
+				f.observer.OnTimerFired(timerCtx, sessionID, tc.Event)
 			}
-			_ = f.Send(context.Background(), sessionID, tc.Event, nil)
+			if err := f.Send(timerCtx, sessionID, tc.Event, nil); err != nil && f.observer != nil {
+				f.observer.OnTimerError(timerCtx, sessionID, tc.Event, err)
+			}
 		})
 		created = append(created, t)
 	}
@@ -389,6 +421,8 @@ func (NoopObserver[StateT, EventT, CtxT]) OnActionError(context.Context, Session
 func (NoopObserver[StateT, EventT, CtxT]) OnTimerSet(context.Context, string, StateT, time.Duration, EventT) {
 }
 func (NoopObserver[StateT, EventT, CtxT]) OnTimerFired(context.Context, string, EventT) {}
+func (NoopObserver[StateT, EventT, CtxT]) OnTimerError(context.Context, string, EventT, error) {
+}
 
 // LogObserver writes simple logs via the standard library log package.
 type LogObserver[StateT, EventT Comparable, CtxT any] struct{ Prefix string }
@@ -414,4 +448,7 @@ func (o LogObserver[StateT, EventT, CtxT]) OnTimerSet(_ context.Context, sid str
 }
 func (o LogObserver[StateT, EventT, CtxT]) OnTimerFired(_ context.Context, sid string, ev EventT) {
 	log.Printf("%s timer fired: sid=%s event=%v", o.pfx(), sid, ev)
+}
+func (o LogObserver[StateT, EventT, CtxT]) OnTimerError(_ context.Context, sid string, ev EventT, err error) {
+	log.Printf("%s timer error: sid=%s event=%v err=%v", o.pfx(), sid, ev, err)
 }

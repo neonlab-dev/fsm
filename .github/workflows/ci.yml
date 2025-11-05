@@ -2,51 +2,98 @@ name: CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches:
+      - main
+    paths-ignore:
+      - 'README.md'
+      - 'DOC_PT.md'
+      - 'DOC_EN.md'
+      - 'coverage.out'
   pull_request:
+    branches:
+      - main
 
 jobs:
-  test:
+  lint:
+    name: Lint
     runs-on: ubuntu-latest
-    env:
-      GOCACHE: ${{ github.workspace }}/.tmp/go-cache
-      GOMODCACHE: ${{ github.workspace }}/.tmp/go-mod-cache
-
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set up Go
+      - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Check formatting
+      - name: Check Go formatting
         run: |
-          files=$(git ls-files '*.go')
-          if [ -z "$files" ]; then
-            exit 0
-          fi
-          unformatted=$(gofmt -l $files)
-          if [ -n "$unformatted" ]; then
-            echo "Go files need formatting:" >&2
-            echo "$unformatted" >&2
+          files=$(gofmt -l .)
+          if [ -n "$files" ]; then
+            echo "The following files need gofmt:"
+            echo "$files"
             exit 1
           fi
-
       - name: Run go vet
-        run: |
-          go vet .
+        run: go vet ./...
 
-      - name: Generate coverage profile
-        run: |
-          go test -coverprofile=coverage.out .
-
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
         with:
-          name: coverage
-          path: |
-            coverage.out
-          retention-days: 7
+          go-version-file: go.mod
+          cache: true
+      - name: Run unit tests
+        run: go test ./...
+
+  deploy_tag:
+    name: Create deploy tag
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Compute deploy tag
+        id: compute_tag
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const tag = `deploy-${process.env.GITHUB_SHA.substring(0, 7)}`;
+            core.setOutput('tag', tag);
+            try {
+              await github.rest.git.getRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `tags/${tag}`,
+              });
+              core.setOutput('exists', 'true');
+            } catch (error) {
+              if (error.status === 404) {
+                core.setOutput('exists', 'false');
+              } else {
+                throw error;
+              }
+            }
+      - name: Create release tag
+        if: steps.compute_tag.outputs.exists != 'true'
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.compute_tag.outputs.tag }}
+          release_name: Deploy ${{ steps.compute_tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          body: |
+            Automated deploy tag for commit ${{ github.sha }}.

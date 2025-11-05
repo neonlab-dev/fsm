@@ -47,7 +47,7 @@ go get github.com/neonlab-dev/fsm
 // Define your state and event enums, wire storage, then send events.
 ```
 
-Run `make test` for unit tests, `make coverage` for coverage reports, or invoke `go test .` directly. Our core library ships with ~96% coverage and a GitHub Actions pipeline that exercises the suite on every push, so you start with a safety net.
+Run `make test` for unit tests, `make coverage` for coverage reports, or invoke `go test .` directly. Our core library ships with ~96% coverage and a GitHub Actions pipeline that enforces formatting (`gofmt`), static analysis (`go vet`), and fresh coverage on every push—so you start with a safety net.
 
 ## Contributing & Feedback
 

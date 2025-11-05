@@ -8,6 +8,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      GOCACHE: ${{ github.workspace }}/.tmp/go-cache
+      GOMODCACHE: ${{ github.workspace }}/.tmp/go-mod-cache
 
     steps:
       - name: Checkout
@@ -19,15 +22,24 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Run unit tests
-        env:
-          GOCACHE: ${{ github.workspace }}/.tmp/go-cache
+      - name: Check formatting
         run: |
-          go test .
+          files=$(git ls-files '*.go')
+          if [ -z "$files" ]; then
+            exit 0
+          fi
+          unformatted=$(gofmt -l $files)
+          if [ -n "$unformatted" ]; then
+            echo "Go files need formatting:" >&2
+            echo "$unformatted" >&2
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: |
+          go vet .
 
       - name: Generate coverage profile
-        env:
-          GOCACHE: ${{ github.workspace }}/.tmp/go-cache
         run: |
           go test -coverprofile=coverage.out .
 
@@ -35,5 +47,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage
-          path: coverage.out
+          path: |
+            coverage.out
           retention-days: 7

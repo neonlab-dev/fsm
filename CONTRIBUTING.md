@@ -32,4 +32,11 @@ Commits without an associated issue can omit the `(#issue)` suffix, but keep the
 - Run `gofmt` on edited Go files.
 - Prefer small, focused changes that keep existing tests green; add tests for new behaviour whenever possible.
 
+## Releases
+
+- Merging to `main` kicks off the release workflow once lint and tests succeed.
+- The workflow tags the commit as `deploy-<short-sha>` (skipping work when the tag exists already).
+- GoReleaser runs against that tag, executes the full test suite again, and publishes a source archive plus release notes to GitHub.
+- If GoReleaser fails, fix the issue and rerun the workflow from the GitHub Actions UI; no manual cleanup is required.
+
 Obrigado! 🚀

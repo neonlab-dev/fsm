@@ -1,0 +1,36 @@
+project_name: fsm
+
+before:
+  hooks:
+    - go test ./...
+
+builds: []
+
+archives:
+  - id: source
+    name_template: "{{ .ProjectName }}_{{ .Version }}_source"
+    format: tar.gz
+    files:
+      - README.md
+      - DOC_EN.md
+      - DOC_PT.md
+      - go.mod
+      - go.sum
+      - "*.go"
+      - examples/**/*
+
+release:
+  github:
+    owner: neonlab-dev
+    name: fsm
+  draft: false
+  prerelease: auto
+
+changelog:
+  use: git
+  filters:
+    exclude:
+      - '^docs?:'
+      - '^test:'
+      - '^ci:'
+      - '^chore:'

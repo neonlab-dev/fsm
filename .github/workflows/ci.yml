@@ -54,14 +54,16 @@ jobs:
       - name: Run unit tests
         run: go test ./...
 
-  deploy_tag:
-    name: Create deploy tag
+  release:
+    name: Release with GoReleaser
     runs-on: ubuntu-latest
     needs: test
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
@@ -89,14 +91,26 @@ jobs:
                 throw error;
               }
             }
-      - name: Create release tag
+      - name: Configure git user
         if: steps.compute_tag.outputs.exists != 'true'
-        uses: actions/create-release@v1
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+      - name: Create and push tag
+        if: steps.compute_tag.outputs.exists != 'true'
+        env:
+          TAG_NAME: ${{ steps.compute_tag.outputs.tag }}
+        run: |
+          git tag -a "${TAG_NAME}" -m "Automated deploy tag for commit ${GITHUB_SHA}."
+          git push origin "${TAG_NAME}"
+      - name: Run GoReleaser
+        if: steps.compute_tag.outputs.exists != 'true'
+        uses: goreleaser/goreleaser-action@v5
+        with:
+          version: latest
+          args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: ${{ steps.compute_tag.outputs.tag }}
-          release_name: Deploy ${{ steps.compute_tag.outputs.tag }}
-          commitish: ${{ github.sha }}
-          body: |
-            Automated deploy tag for commit ${{ github.sha }}.
+          GORELEASER_CURRENT_TAG: ${{ steps.compute_tag.outputs.tag }}
+          GOPROXY: https://proxy.golang.org,direct
+          GOSUMDB: sum.golang.org

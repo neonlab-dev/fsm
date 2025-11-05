@@ -51,4 +51,4 @@ Run `make test` for unit tests, `make coverage` for coverage reports, or invoke 
 
 ## Contributing & Feedback
 
-We love real-world stories. Open an issue, share a win, or send a PR—let's grow the toolkit together.
+We love real-world stories. Open an issue, share a win, or send a PR—let's grow the toolkit together. See [`CONTRIBUTING.md`](CONTRIBUTING.md) for our commit pattern (`type(scope): summary (#issue)`) and review checklist.

@@ -75,7 +75,7 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const tag = `deploy-${process.env.GITHUB_SHA.substring(0, 7)}`;
+            const tag = `v0.0.0-deploy.${process.env.GITHUB_SHA.substring(0, 7)}`;
             core.setOutput('tag', tag);
             try {
               await github.rest.git.getRef({
